@@ -42,7 +42,9 @@ use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIGestureRecognizerState, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen, UITapGestureRecognizer,
-    UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
+    UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis, UIPencilInteraction,
+    UIPencilInteractionDelegate, UIPencilInteractionPhase, UIPencilInteractionSqueeze,
+    UIPencilInteractionTap,
     UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITouchType, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
     UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
@@ -93,6 +95,37 @@ thread_local! {
 /// rather than ended, so GPUI does not also take them for a click.
 pub fn on_multi_finger_tap(callback: impl FnMut(u8) + 'static) {
     MULTI_FINGER_TAP.with_borrow_mut(|current| *current = Some(Box::new(callback)));
+}
+
+/// What was done on the Apple Pencil itself (Pencil 2 and Pro).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PencilAction {
+    /// A double tap on its side.
+    DoubleTap,
+    /// A squeeze (Pencil Pro, iPadOS 17.5 and later).
+    Squeeze,
+}
+
+thread_local! {
+    static PENCIL_ACTION: RefCell<Option<Box<dyn FnMut(PencilAction)>>> = RefCell::new(None);
+}
+
+/// Calls `callback` when the Pencil is double-tapped or squeezed, from the main
+/// run loop. What the person set in Settings for these is
+/// `UIPencilInteraction.preferredTapAction` / `preferredSqueezeAction`.
+pub fn on_pencil_action(callback: impl FnMut(PencilAction) + 'static) {
+    PENCIL_ACTION.with_borrow_mut(|current| *current = Some(Box::new(callback)));
+}
+
+fn pencil_action(action: PencilAction) {
+    // Taken out while it runs, so it may replace itself.
+    let callback = PENCIL_ACTION.with_borrow_mut(Option::take);
+    if let Some(mut callback) = callback {
+        callback(action);
+        PENCIL_ACTION.with_borrow_mut(|current| {
+            current.get_or_insert(callback);
+        });
+    }
 }
 
 /// Where iPadOS draws a windowed scene's controls (the three dots), in the
@@ -259,6 +292,34 @@ define_class!(
         fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
             self.ivars()
                 .with_window(|window| window.handle_back_gesture(recognizer));
+        }
+    }
+
+    unsafe impl UIPencilInteractionDelegate for MetalView {
+        // Before iPadOS 17.5; later versions call the method below instead.
+        #[unsafe(method(pencilInteractionDidTap:))]
+        fn pencil_did_tap(&self, _interaction: &UIPencilInteraction) {
+            pencil_action(PencilAction::DoubleTap);
+        }
+
+        #[unsafe(method(pencilInteraction:didReceiveTap:))]
+        fn pencil_did_receive_tap(
+            &self,
+            _interaction: &UIPencilInteraction,
+            _tap: &UIPencilInteractionTap,
+        ) {
+            pencil_action(PencilAction::DoubleTap);
+        }
+
+        #[unsafe(method(pencilInteraction:didReceiveSqueeze:))]
+        fn pencil_did_receive_squeeze(
+            &self,
+            _interaction: &UIPencilInteraction,
+            squeeze: &UIPencilInteractionSqueeze,
+        ) {
+            if squeeze.phase() == UIPencilInteractionPhase::Ended {
+                pencil_action(PencilAction::Squeeze);
+            }
         }
     }
 
@@ -523,6 +584,13 @@ impl IosWindow {
             tap_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
             view.addGestureRecognizer(&tap_recognizer);
         }
+
+        // The Pencil's double tap and squeeze, for `on_pencil_action`.
+        let pencil_interaction = UIPencilInteraction::initWithDelegate(
+            UIPencilInteraction::alloc(main_thread),
+            ProtocolObject::from_ref(&*view),
+        );
+        view.addInteraction(ProtocolObject::from_ref(&*pencil_interaction));
 
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));

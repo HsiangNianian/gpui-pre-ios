@@ -51,7 +51,8 @@ impl<T> CallbackSlot<T> {
 pub(crate) use display::*;
 pub use platform::*;
 pub use window::{
-    current_touch_is_pencil, on_multi_finger_tap, set_status_bar_style, window_controls_rect,
+    PencilAction, current_touch_is_pencil, on_multi_finger_tap, on_pencil_action,
+    set_status_bar_style, window_controls_rect,
 };
 pub(crate) use window::*;
 

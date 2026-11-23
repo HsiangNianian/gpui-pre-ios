@@ -10,7 +10,7 @@ pub mod ios;
 #[cfg(target_os = "ios")]
 pub use ios::{
     ExternalDisplay, IosPlatform, current_platform, current_touch_is_pencil, external_display,
-    on_multi_finger_tap, share_file, window_controls_rect,
+    PencilAction, on_multi_finger_tap, on_pencil_action, share_file, window_controls_rect,
 };
 
 /// The foreground color used by the iOS status bar.

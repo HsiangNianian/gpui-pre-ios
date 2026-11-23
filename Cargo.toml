@@ -153,6 +153,8 @@ features = [
     "UIPopoverPresentationController",
     "UIPresentationController",
     "UIViewLayoutRegion",
+    "UIInteraction",
+    "UIPencilInteraction",
     "UIScreenEdgePanGestureRecognizer",
     "UIInterface",
     "UIOpenURLContext",
