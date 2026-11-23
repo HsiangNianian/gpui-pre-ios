@@ -40,7 +40,8 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
+    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIPinchGestureRecognizer, UIRectCorner,
+    UIRectEdge, UIScreen,
     UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITouchType, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
     UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
@@ -207,6 +208,12 @@ define_class!(
                 .with_window(|window| window.handle_scroll(recognizer));
         }
 
+        #[unsafe(method(handlePinch:))]
+        fn handle_pinch(&self, recognizer: &UIPinchGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| window.handle_pinch(recognizer));
+        }
+
         #[unsafe(method(handleBackGesture:))]
         fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
             self.ivars()
@@ -215,12 +222,26 @@ define_class!(
     }
 
     unsafe impl UIGestureRecognizerDelegate for MetalView {
-        // Only the back-gesture recognizer uses this view as its delegate.
+        // The back-gesture and pinch recognizers use this view as their delegate.
         #[unsafe(method(gestureRecognizerShouldBegin:))]
         fn gesture_recognizer_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
+            if recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some() {
+                return true;
+            }
             self.ivars()
                 .with_window(|window| window.begin_back_gesture(recognizer))
                 .unwrap_or(false)
+        }
+
+        // A pinch runs alongside the scroll recognizer and GPUI's own touch handling.
+        #[unsafe(method(gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:))]
+        fn should_recognize_simultaneously(
+            &self,
+            recognizer: &UIGestureRecognizer,
+            other: &UIGestureRecognizer,
+        ) -> bool {
+            recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
+                || other.downcast_ref::<UIPinchGestureRecognizer>().is_some()
         }
     }
 );
@@ -424,6 +445,21 @@ impl IosWindow {
         back_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
         view.addGestureRecognizer(&back_recognizer);
 
+        // Two-finger pinches become GPUI pinch events. Touches keep reaching
+        // `touchesBegan` meanwhile, as with the scroll recognizer.
+        let pinch_target: &AnyObject = &view;
+        // SAFETY: `MetalView` implements `handlePinch:` and owns the recognizer.
+        let pinch_recognizer = unsafe {
+            UIPinchGestureRecognizer::initWithTarget_action(
+                UIPinchGestureRecognizer::alloc(main_thread),
+                Some(pinch_target),
+                Some(sel!(handlePinch:)),
+            )
+        };
+        pinch_recognizer.setCancelsTouchesInView(false);
+        pinch_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
+        view.addGestureRecognizer(&pinch_recognizer);
+
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
         window.setRootViewController(Some(&view_controller));
@@ -601,6 +637,16 @@ impl IosWindowState {
         self.modifiers.set(event.modifiers);
         self.input_callback
             .with(|callback| callback(PlatformInput::Scroll(event)));
+    }
+
+    /// Delivers one step of a two-finger pinch.
+    fn handle_pinch(&self, recognizer: &UIPinchGestureRecognizer) {
+        let Some(event) = pinch_event(recognizer, &self.view) else {
+            return;
+        };
+        self.modifiers.set(event.modifiers);
+        self.input_callback
+            .with(|callback| callback(PlatformInput::Pinch(event)));
     }
 
     /// Offers a starting back gesture to GPUI, returning whether an element

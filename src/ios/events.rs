@@ -1,13 +1,13 @@
 //! Conversion from UIKit events to GPUI input events.
 
 use gpui::{
-    BackGestureEvent, BackGesturePhase, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
-    ScrollSource, TouchId, TouchPhase, px,
+    BackGestureEvent, BackGesturePhase, Modifiers, PinchEvent, Pixels, Point, ScrollDelta,
+    ScrollEvent, ScrollSource, TouchId, TouchPhase, px,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_ui_kit::{
-    UIGestureRecognizerState, UIKeyModifierFlags, UIPanGestureRecognizer, UIRectEdge,
-    UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UIView,
+    UIGestureRecognizerState, UIKeyModifierFlags, UIPanGestureRecognizer, UIPinchGestureRecognizer,
+    UIRectEdge, UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UIView,
 };
 
 /// A release faster than this, in points per second toward going back, commits
@@ -106,6 +106,36 @@ pub fn scroll_event(recognizer: &UIPanGestureRecognizer, view: &UIView) -> Optio
         modifiers: modifiers(recognizer.modifierFlags()),
         touch_phase,
         source: ScrollSource::Pointer,
+    })
+}
+
+/// Converts one step of a two-finger pinch.
+///
+/// The recognizer's scale is reset after each step, so every event carries only
+/// the zoom since the previous one, as on macOS: 0.1 is 10% larger. Returns
+/// `None` for states that carry no pinch.
+pub fn pinch_event(recognizer: &UIPinchGestureRecognizer, view: &UIView) -> Option<PinchEvent> {
+    let phase = match recognizer.state() {
+        UIGestureRecognizerState::Began => TouchPhase::Started,
+        UIGestureRecognizerState::Changed => TouchPhase::Moved,
+        UIGestureRecognizerState::Ended => TouchPhase::Ended,
+        UIGestureRecognizerState::Cancelled | UIGestureRecognizerState::Failed => {
+            TouchPhase::Cancelled
+        }
+        _ => return None,
+    };
+    let delta = recognizer.scale() as f32 - 1.;
+    recognizer.setScale(1.);
+    let location = recognizer.locationInView(Some(view));
+    Some(PinchEvent {
+        position: Point::new(px(location.x as f32), px(location.y as f32)),
+        delta: if matches!(phase, TouchPhase::Started | TouchPhase::Moved) {
+            delta
+        } else {
+            0.
+        },
+        modifiers: modifiers(recognizer.modifierFlags()),
+        phase,
     })
 }
 

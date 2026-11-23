@@ -145,6 +145,7 @@ features = [
     "UIGeometry",
     "UIGestureRecognizer",
     "UIPanGestureRecognizer",
+    "UIPinchGestureRecognizer",
     "UIScreenEdgePanGestureRecognizer",
     "UIInterface",
     "UIOpenURLContext",
