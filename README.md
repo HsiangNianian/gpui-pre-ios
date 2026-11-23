@@ -17,5 +17,6 @@ The patches:
 - External displays: a cabled or AirPlay display's scene (`UIWindowSceneSessionRoleExternalDisplayNonInteractive`)
   is listed by `displays()`, `gpui_ios::external_display()` describes it, and a window opened with its
   `display_id` is shown on it (and closed when it disconnects).
+- Two-finger pinches are delivered as GPUI `PinchEvent`s (`on_pinch`).
 
 Licensed under the Apache License 2.0, like the original (LICENSE-APACHE).
