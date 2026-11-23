@@ -16,7 +16,7 @@ use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{
     UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext, UIScene,
     UISceneConfiguration, UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIWindowScene,
-    UIWindowSceneDelegate,
+    UIWindowSceneDelegate, UIWindowSceneSessionRoleExternalDisplayNonInteractive,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -32,6 +32,8 @@ pub(super) struct IosApplicationState {
     pub(super) app_lifecycle: CallbackSlot<Box<dyn FnMut(AppLifecyclePhase)>>,
     pub(super) memory_warning: CallbackSlot<Box<dyn FnMut()>>,
     scene: RefCell<Option<Retained<UIWindowScene>>>,
+    /// The scene UIKit gives a cabled or AirPlay display, for windows opened on that display.
+    external_scene: RefCell<Option<Retained<UIWindowScene>>>,
     // The link retains its delegate target, which only weakly references this state.
     display_link: RefCell<Option<Retained<CADisplayLink>>>,
     windows: RefCell<Vec<Weak<IosWindowState>>>,
@@ -87,6 +89,10 @@ impl IosApplicationState {
 
     pub(super) fn window_scene(&self) -> Option<Retained<UIWindowScene>> {
         self.scene.borrow().clone()
+    }
+
+    pub(super) fn external_scene(&self) -> Option<Retained<UIWindowScene>> {
+        self.external_scene.borrow().clone()
     }
 
     pub(super) fn register_window(&self, window: &Rc<IosWindowState>) {
@@ -301,7 +307,7 @@ define_class!(
         fn will_connect(
             &self,
             scene: &UIScene,
-            _session: &UISceneSession,
+            session: &UISceneSession,
             options: &SceneConnectionOptions,
         ) {
             let Some(scene) = scene.downcast_ref::<UIWindowScene>() else {
@@ -311,6 +317,13 @@ define_class!(
                 return;
             };
             let application = &platform.application;
+            // An external display gets a scene of its own; GPUI windows opened with its display id
+            // are shown there. It drives no lifecycle, and is listed among the displays from now on.
+            if &*session.role() == unsafe { UIWindowSceneSessionRoleExternalDisplayNonInteractive } {
+                *application.external_scene.borrow_mut() = Some(scene.retain());
+                platform.notify_displays_changed();
+                return;
+            }
             if application.window_scene().is_some() {
                 log::error!("GPUI iOS currently supports one connected window scene");
                 return;
@@ -344,6 +357,21 @@ define_class!(
 
         #[unsafe(method(sceneDidDisconnect:))]
         fn did_disconnect(&self, scene: &UIScene) {
+            if let Some(platform) = self.ivars().upgrade() {
+                let external = platform
+                    .application
+                    .external_scene()
+                    .is_some_and(|current| std::ptr::eq::<UIScene>(&**current, scene));
+                if external {
+                    platform.application.external_scene.borrow_mut().take();
+                    // The display is gone: close the windows that were on it.
+                    platform
+                        .application
+                        .with_windows(IosWindowState::external_display_disconnected);
+                    platform.notify_displays_changed();
+                    return;
+                }
+            }
             if let Some(platform) = self.platform_for_scene(scene) {
                 platform.application.stop_display_link();
                 platform.application.scene.borrow_mut().take();

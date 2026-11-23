@@ -8,7 +8,9 @@
 pub mod ios;
 
 #[cfg(target_os = "ios")]
-pub use ios::{IosPlatform, current_platform, current_touch_is_pencil};
+pub use ios::{
+    ExternalDisplay, IosPlatform, current_platform, current_touch_is_pencil, external_display,
+};
 
 /// The foreground color used by the iOS status bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

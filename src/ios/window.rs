@@ -304,24 +304,34 @@ pub(crate) struct IosWindowState {
     /// Current modifiers
     modifiers: Cell<Modifiers>,
     renderer: Mutex<MetalRenderer>,
+    /// Whether the window is shown on an external display's scene rather than the app's own.
+    on_external_display: bool,
 }
 
 impl IosWindow {
     #[allow(deprecated)] // Window construction can precede scene connection.
     pub fn new(
         _handle: AnyWindowHandle,
-        _params: WindowParams,
+        params: WindowParams,
         platform: &Rc<IosPlatformState>,
     ) -> anyhow::Result<Self> {
-        // Create the window on the main screen
-        let screen = IosDisplay::main();
+        // A window asked for on the external display goes to that display's scene.
+        let external_scene = platform.application.external_scene().filter(|scene| {
+            params.display_id == Some(IosDisplay::from_screen(scene.screen()).id())
+        });
+        let on_external_display = external_scene.is_some();
+        let window_scene = external_scene.or_else(|| platform.application.window_scene());
+        let window_scene = window_scene.as_deref();
+
+        // Create the window on its scene's screen, or the main screen before a scene connects
+        let screen = window_scene
+            .map(|scene| IosDisplay::from_screen(scene.screen()))
+            .unwrap_or_else(IosDisplay::main);
         let screen_bounds = screen.bounds();
         let scale_factor = screen.scale();
 
         let main_thread = main_thread_marker().expect("UIKit requires the main thread");
         // Create UIWindow
-        let window_scene = platform.application.window_scene();
-        let window_scene = window_scene.as_deref();
         let (window, screen_bounds_cg, scale) = if let Some(scene) = window_scene {
             let screen = scene.screen();
             let bounds = screen.bounds();
@@ -418,8 +428,12 @@ impl IosWindow {
         view_controller.setView(Some(&view));
         window.setRootViewController(Some(&view_controller));
 
-        // Make the window visible
-        window.makeKeyAndVisible();
+        // Make the window visible; one on an external display must not take the keyboard
+        if on_external_display {
+            window.setHidden(false);
+        } else {
+            window.makeKeyAndVisible();
+        }
 
         // Create a hidden text input view for keyboard handling.
         // Uses our custom GPUITextInputView which implements UIKeyInput
@@ -462,6 +476,7 @@ impl IosWindow {
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             renderer: Mutex::new(renderer),
+            on_external_display,
         };
 
         Ok(Self {
@@ -485,9 +500,23 @@ impl IosWindow {
 
 impl IosWindowState {
     pub(super) fn attach_to_scene(&self, scene: &UIWindowScene) {
+        if self.on_external_display {
+            return;
+        }
         self.window.setWindowScene(Some(scene));
         self.window.makeKeyAndVisible();
         self.handle_layout_change();
+    }
+
+    /// Hides and closes a window that was on the external display, which has disconnected.
+    pub(super) fn external_display_disconnected(&self) {
+        if !self.on_external_display {
+            return;
+        }
+        self.window.setHidden(true);
+        if let Some(callback) = self.close_callback.take() {
+            callback();
+        }
     }
 
     fn register_keyboard_observers(self: &Rc<Self>) {
@@ -825,6 +854,9 @@ impl Drop for IosWindow {
             unsafe { NSNotificationCenter::defaultCenter().removeObserver((&*observer).as_ref()) };
         }
 
+        if self.on_external_display {
+            self.window.setHidden(true);
+        }
         *self.view_controller.ivars().0.borrow_mut() = Weak::new();
         *self.view.ivars().0.borrow_mut() = Weak::new();
         self.text_input_view.set_window(Weak::new());
@@ -931,7 +963,11 @@ impl PlatformWindow for IosWindow {
     }
 
     fn activate(&self) {
-        self.window.makeKeyAndVisible();
+        if self.on_external_display {
+            self.window.setHidden(false);
+        } else {
+            self.window.makeKeyAndVisible();
+        }
     }
 
     fn is_active(&self) -> bool {

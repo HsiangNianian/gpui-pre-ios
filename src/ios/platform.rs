@@ -58,6 +58,46 @@ pub(crate) struct IosPlatformState {
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
 }
 
+impl IosPlatformState {
+    /// Tells GPUI the displays changed, once the current native callback has unwound.
+    pub(super) fn notify_displays_changed(self: &Rc<Self>) {
+        let state = Rc::downgrade(self);
+        self.foreground_executor
+            .spawn(async move {
+                if let Some(state) = state.upgrade() {
+                    state.displays_changed_callback.with(|callback| callback());
+                }
+            })
+            .detach();
+    }
+}
+
+/// An external display (cabled or AirPlay) that UIKit gave this app a scene on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalDisplay {
+    /// Its id among GPUI's displays: open a window with this `display_id` to show it there.
+    pub id: gpui::DisplayId,
+    /// Its size in points.
+    pub size: gpui::Size<gpui::Pixels>,
+    /// Its scale factor.
+    pub scale: f32,
+}
+
+/// The external display a window can be opened on, if one is connected.
+///
+/// Its connection and disconnection are reported as displays changing (`App::observe_displays`). A window
+/// on it is non-interactive, and is closed when the display disconnects. Call from the main thread.
+pub fn external_display() -> Option<ExternalDisplay> {
+    let platform = super::application::current_platform()?;
+    let scene = platform.application.external_scene()?;
+    let display = IosDisplay::from_screen(scene.screen());
+    Some(ExternalDisplay {
+        id: display.id(),
+        size: display.bounds().size,
+        scale: display.scale(),
+    })
+}
+
 impl Default for IosPlatform {
     fn default() -> Self {
         Self::new()
@@ -238,7 +278,20 @@ impl Platform for IosPlatform {
     }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
+        // Only screens a window can be shown on: the main screen, the one the app's scene is on, and
+        // an external display once UIKit has given it a scene (which is when it is reported added).
+        let scenes = [
+            self.0.application.window_scene(),
+            self.0.application.external_scene(),
+        ];
+        let usable: Vec<_> = scenes
+            .iter()
+            .flatten()
+            .map(|scene| IosDisplay::from_screen(scene.screen()).id())
+            .collect();
+        let main = IosDisplay::main().id();
         IosDisplay::all()
+            .filter(|display| display.id() == main || usable.contains(&display.id()))
             .map(|display| Rc::new(display) as Rc<dyn PlatformDisplay>)
             .collect()
     }
