@@ -225,12 +225,12 @@ define_class!(
         // The back-gesture and pinch recognizers use this view as their delegate.
         #[unsafe(method(gestureRecognizerShouldBegin:))]
         fn gesture_recognizer_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
-            if recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some() {
-                return true;
-            }
-            self.ivars()
-                .with_window(|window| window.begin_back_gesture(recognizer))
-                .unwrap_or(false)
+            // No early return: define_class! converts the body's value to an ObjC BOOL.
+            recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
+                || self
+                    .ivars()
+                    .with_window(|window| window.begin_back_gesture(recognizer))
+                    .unwrap_or(false)
         }
 
         // A pinch runs alongside the scroll recognizer and GPUI's own touch handling.
