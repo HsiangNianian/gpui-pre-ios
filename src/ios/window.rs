@@ -31,7 +31,7 @@ use objc2::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-    NSArray, NSNotification, NSNotificationCenter, NSObjectProtocol, NSSet, NSValue,
+    NSArray, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol, NSSet, NSValue,
 };
 use objc2_quartz_core::CAMetalLayer;
 use objc2_ui_kit::{
@@ -40,8 +40,9 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIPinchGestureRecognizer, UIRectCorner,
-    UIRectEdge, UIScreen,
+    UIGestureRecognizerDelegate, UIGestureRecognizerState, UIPanGestureRecognizer,
+    UIPinchGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen, UITapGestureRecognizer,
+    UIViewLayoutRegion, UIViewLayoutRegionAdaptivityAxis,
     UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITouchType, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
     UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
@@ -81,6 +82,31 @@ thread_local! {
 /// that event is dispatched; afterwards it keeps describing the most recent touch.
 pub fn current_touch_is_pencil() -> bool {
     TOUCH_IS_PENCIL.get()
+}
+
+thread_local! {
+    static MULTI_FINGER_TAP: RefCell<Option<Box<dyn FnMut(u8)>>> = RefCell::new(None);
+}
+
+/// Calls `callback` with the number of fingers (2 or 3) whenever a window sees
+/// a multi-finger tap, from the main run loop. The tap's touches are cancelled
+/// rather than ended, so GPUI does not also take them for a click.
+pub fn on_multi_finger_tap(callback: impl FnMut(u8) + 'static) {
+    MULTI_FINGER_TAP.with_borrow_mut(|current| *current = Some(Box::new(callback)));
+}
+
+/// Where iPadOS draws a windowed scene's controls (the three dots), in the
+/// app's first window: a corner rectangle content should keep clear of, or
+/// `None` when there are none (full screen, or before iPadOS 26).
+pub fn window_controls_rect() -> Option<Bounds<Pixels>> {
+    let platform = super::application::current_platform()?;
+    let mut rect = None;
+    platform.application.with_windows(|window| {
+        if rect.is_none() && !window.on_external_display {
+            rect = Some(window.window_controls_rect());
+        }
+    });
+    rect.flatten()
 }
 
 #[derive(Default)]
@@ -214,6 +240,21 @@ define_class!(
                 .with_window(|window| window.handle_pinch(recognizer));
         }
 
+        #[unsafe(method(handleMultiFingerTap:))]
+        fn handle_multi_finger_tap(&self, recognizer: &UITapGestureRecognizer) {
+            if recognizer.state() == UIGestureRecognizerState::Ended {
+                let fingers = recognizer.numberOfTouchesRequired() as u8;
+                // Taken out while it runs, so it may replace itself.
+                let callback = MULTI_FINGER_TAP.with_borrow_mut(Option::take);
+                if let Some(mut callback) = callback {
+                    callback(fingers);
+                    MULTI_FINGER_TAP.with_borrow_mut(|current| {
+                        current.get_or_insert(callback);
+                    });
+                }
+            }
+        }
+
         #[unsafe(method(handleBackGesture:))]
         fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
             self.ivars()
@@ -227,21 +268,25 @@ define_class!(
         fn gesture_recognizer_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
             // No early return: define_class! converts the body's value to an ObjC BOOL.
             recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
+                || recognizer.downcast_ref::<UITapGestureRecognizer>().is_some()
                 || self
                     .ivars()
                     .with_window(|window| window.begin_back_gesture(recognizer))
                     .unwrap_or(false)
         }
 
-        // A pinch runs alongside the scroll recognizer and GPUI's own touch handling.
+        // Pinches and taps run alongside the other recognizers and GPUI's own touch handling.
         #[unsafe(method(gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:))]
         fn should_recognize_simultaneously(
             &self,
             recognizer: &UIGestureRecognizer,
             other: &UIGestureRecognizer,
         ) -> bool {
-            recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
-                || other.downcast_ref::<UIPinchGestureRecognizer>().is_some()
+            let ours = |recognizer: &UIGestureRecognizer| {
+                recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
+                    || recognizer.downcast_ref::<UITapGestureRecognizer>().is_some()
+            };
+            ours(recognizer) || ours(other)
         }
     }
 );
@@ -460,6 +505,25 @@ impl IosWindow {
         pinch_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
         view.addGestureRecognizer(&pinch_recognizer);
 
+        // Two- and three-finger taps, for `on_multi_finger_tap`. Fingers only:
+        // the Pencil never counts.
+        let fingers = NSArray::from_retained_slice(&[NSNumber::new_isize(UITouchType::Direct.0)]);
+        for touches in [2, 3] {
+            let tap_target: &AnyObject = &view;
+            // SAFETY: `MetalView` implements `handleMultiFingerTap:` and owns the recognizer.
+            let tap_recognizer = unsafe {
+                UITapGestureRecognizer::initWithTarget_action(
+                    UITapGestureRecognizer::alloc(main_thread),
+                    Some(tap_target),
+                    Some(sel!(handleMultiFingerTap:)),
+                )
+            };
+            tap_recognizer.setNumberOfTouchesRequired(touches);
+            tap_recognizer.setAllowedTouchTypes(&fingers);
+            tap_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
+            view.addGestureRecognizer(&tap_recognizer);
+        }
+
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
         window.setRootViewController(Some(&view_controller));
@@ -542,6 +606,42 @@ impl IosWindowState {
         self.window.setWindowScene(Some(scene));
         self.window.makeKeyAndVisible();
         self.handle_layout_change();
+    }
+
+    /// The corner iPadOS 26 keeps for a windowed scene's controls: where the
+    /// safe area adapted to them horizontally and vertically exceeds the plain one.
+    fn window_controls_rect(&self) -> Option<Bounds<Pixels>> {
+        if !self
+            .view
+            .respondsToSelector(sel!(edgeInsetsForLayoutRegion:))
+        {
+            return None;
+        }
+        let safe = self.view.safeAreaInsets();
+        let adapted = |axis| {
+            self.view.edgeInsetsForLayoutRegion(
+                &UIViewLayoutRegion::safeAreaLayoutRegionWithCornerAdaptation(axis),
+            )
+        };
+        let horizontal = adapted(UIViewLayoutRegionAdaptivityAxis::Horizontal);
+        let vertical = adapted(UIViewLayoutRegionAdaptivityAxis::Vertical);
+        let height = vertical.top.max(safe.top);
+        let width = |adapted: f64, plain: f64| (adapted > plain + 0.5).then_some(adapted);
+        let view_width = self.view.bounds().size.width;
+        let (x, width) = if let Some(width) = width(horizontal.left, safe.left) {
+            (0., width)
+        } else if let Some(width) = width(horizontal.right, safe.right) {
+            (view_width - width, width)
+        } else if vertical.top > safe.top + 0.5 {
+            // Only pushed down: the controls span the top edge's leading corner.
+            (0., horizontal.left.max(safe.left))
+        } else {
+            return None;
+        };
+        Some(Bounds {
+            origin: Point::new(px(x as f32), px(0.)),
+            size: size(px(width as f32), px(height as f32)),
+        })
     }
 
     /// Hides and closes a window that was on the external display, which has disconnected.

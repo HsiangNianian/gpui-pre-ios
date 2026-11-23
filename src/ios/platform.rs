@@ -72,6 +72,19 @@ impl IosPlatformState {
     }
 }
 
+/// Offers a file to the share sheet (Save to Files, AirDrop, Mail…), over the
+/// app's window. iOS has no save dialog: `prompt_for_new_path` answers with a
+/// temporary path, and the app calls this once it has written the file there.
+pub fn share_file(path: &Path) -> Result<()> {
+    let platform = super::application::current_platform()
+        .ok_or_else(|| anyhow!("the iOS application is not running"))?;
+    let presenter = IosPlatform(platform)
+        .presented_view_controller()
+        .ok_or_else(|| anyhow!("no window to present the share sheet from"))?;
+    super::files::share(&presenter, path);
+    Ok(())
+}
+
 /// An external display (cabled or AirPlay) that UIKit gave this app a scene on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalDisplay {
@@ -359,28 +372,37 @@ impl Platform for IosPlatform {
         Task::ready(Ok(()))
     }
 
+    /// Picks files with the document picker; they arrive as copies in the
+    /// app's temporary Inbox. Directories cannot be picked.
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        if tx
-            .send(Err(anyhow!("File picker not yet implemented for iOS")))
-            .is_err()
-        {
-            log::debug!("GPUI iOS: File picker receiver was dropped");
+        match self.presented_view_controller() {
+            Some(presenter) => super::files::pick_files(&presenter, options.multiple, tx),
+            None => {
+                if tx
+                    .send(Err(anyhow!("no window to present the file picker from")))
+                    .is_err()
+                {
+                    log::debug!("GPUI iOS: File picker receiver was dropped");
+                }
+            }
         }
         rx
     }
 
+    /// Answers with a fresh path in the app's temporary directory: the app
+    /// writes the file there, then calls `gpui_ios::share_file` with it.
     fn prompt_for_new_path(
         &self,
         _directory: &Path,
-        _suggested_name: Option<&str>,
+        suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
         let (tx, rx) = oneshot::channel();
         if tx
-            .send(Err(anyhow!("Save dialog not yet implemented for iOS")))
+            .send(super::files::new_export_path(suggested_name))
             .is_err()
         {
             log::debug!("GPUI iOS: Save dialog receiver was dropped");

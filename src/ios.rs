@@ -1,6 +1,7 @@
 //! UIKit-backed implementation details for the iOS GPUI platform.
 
 mod application;
+mod files;
 mod display;
 mod events;
 mod platform;
@@ -49,7 +50,9 @@ impl<T> CallbackSlot<T> {
 
 pub(crate) use display::*;
 pub use platform::*;
-pub use window::{current_touch_is_pencil, set_status_bar_style};
+pub use window::{
+    current_touch_is_pencil, on_multi_finger_tap, set_status_bar_style, window_controls_rect,
+};
 pub(crate) use window::*;
 
 /// Returns the native platform implementation for iOS.
