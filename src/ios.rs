@@ -49,7 +49,7 @@ impl<T> CallbackSlot<T> {
 
 pub(crate) use display::*;
 pub use platform::*;
-pub use window::set_status_bar_style;
+pub use window::{current_touch_is_pencil, set_status_bar_style};
 pub(crate) use window::*;
 
 /// Returns the native platform implementation for iOS.

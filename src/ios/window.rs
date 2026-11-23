@@ -41,7 +41,7 @@ use objc2_ui_kit::{
 use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
-    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
+    UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITouchType, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
     UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
 };
@@ -67,6 +67,20 @@ struct KeyboardDismissTouch {
 /// 0 = default (dark content), 1 = light content.
 /// Accessed from the main thread only.
 static STATUS_BAR_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+thread_local! {
+    /// Whether the touch delivered most recently came from an Apple Pencil.
+    static TOUCH_IS_PENCIL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the touch being delivered comes from an Apple Pencil rather than a finger (or an indirect
+/// pointer).
+///
+/// It is set before each touch event reaches GPUI, so an event handler can read it synchronously while
+/// that event is dispatched; afterwards it keeps describing the most recent touch.
+pub fn current_touch_is_pencil() -> bool {
+    TOUCH_IS_PENCIL.get()
+}
 
 #[derive(Default)]
 pub(super) struct WindowReference(pub(super) RefCell<Weak<IosWindowState>>);
@@ -544,6 +558,7 @@ impl IosWindowState {
             force: touch_force(touch),
         };
         self.handle_keyboard_dismiss_touch(&event);
+        TOUCH_IS_PENCIL.set(touch.r#type() == UITouchType::Pencil);
         self.input_callback
             .with(|callback| callback(PlatformInput::Touch(event)));
     }
