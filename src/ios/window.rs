@@ -68,9 +68,21 @@ struct KeyboardDismissTouch {
 }
 
 /// Global storage for the current status bar style.
-/// 0 = default (dark content), 1 = light content.
+/// 0 = dark content, 1 = light content, 2 = UIKit's default, which follows the
+/// interface style (light content in dark mode).
 /// Accessed from the main thread only.
-static STATUS_BAR_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static STATUS_BAR_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(2);
+
+/// The interface style every window is held to: 0 = the system's, 1 = light, 2 = dark.
+static INTERFACE_STYLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+fn ui_interface_style() -> UIUserInterfaceStyle {
+    match INTERFACE_STYLE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => UIUserInterfaceStyle::Light,
+        2 => UIUserInterfaceStyle::Dark,
+        _ => UIUserInterfaceStyle::Unspecified,
+    }
+}
 
 thread_local! {
     /// Whether the touch delivered most recently came from an Apple Pencil.
@@ -165,10 +177,10 @@ define_class!(
         #[unsafe(method(preferredStatusBarStyle))]
         fn preferred_status_bar_style(&self) -> UIStatusBarStyle {
             let style = STATUS_BAR_STYLE.load(std::sync::atomic::Ordering::Relaxed);
-            if style == 1 {
-                UIStatusBarStyle::LightContent
-            } else {
-                UIStatusBarStyle::DarkContent
+            match style {
+                0 => UIStatusBarStyle::DarkContent,
+                1 => UIStatusBarStyle::LightContent,
+                _ => UIStatusBarStyle::Default,
             }
         }
 
@@ -206,6 +218,35 @@ pub fn set_status_bar_style(style: crate::StatusBarContentStyle) {
     // Keep its single-application behavior without making runtime events global.
     if let Some(platform) = super::application::current_platform() {
         platform.application.with_windows(|window| {
+            window.view_controller.setNeedsStatusBarAppearanceUpdate();
+        });
+    }
+}
+
+/// Hold every window, and those opened later, to a light or dark interface, or let them follow the
+/// system's. The status bar's content follows it: light content over a dark interface, dark over a light
+/// one. System sheets, menus and the keyboard presented over the windows take the same style.
+///
+/// For an app with a light or dark theme of its own, which may differ from the system's.
+pub fn set_interface_style(style: crate::InterfaceStyle) {
+    use crate::InterfaceStyle;
+
+    let value = match style {
+        InterfaceStyle::System => 0,
+        InterfaceStyle::Light => 1,
+        InterfaceStyle::Dark => 2,
+    };
+    INTERFACE_STYLE.store(value, std::sync::atomic::Ordering::Relaxed);
+    let bar = match style {
+        InterfaceStyle::System => 2,
+        InterfaceStyle::Light => 0,
+        InterfaceStyle::Dark => 1,
+    };
+    STATUS_BAR_STYLE.store(bar, std::sync::atomic::Ordering::Relaxed);
+
+    if let Some(platform) = super::application::current_platform() {
+        platform.application.with_windows(|window| {
+            window.window.setOverrideUserInterfaceStyle(ui_interface_style());
             window.view_controller.setNeedsStatusBarAppearanceUpdate();
         });
     }
@@ -595,6 +636,7 @@ impl IosWindow {
         let view_controller = ViewController::new(main_thread);
         view_controller.setView(Some(&view));
         window.setRootViewController(Some(&view_controller));
+        window.setOverrideUserInterfaceStyle(ui_interface_style());
 
         // Make the window visible; one on an external display must not take the keyboard
         if on_external_display {

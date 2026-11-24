@@ -52,7 +52,7 @@ pub(crate) use display::*;
 pub use platform::*;
 pub use window::{
     PencilAction, current_touch_is_pencil, on_multi_finger_tap, on_pencil_action,
-    set_status_bar_style, window_controls_rect,
+    set_interface_style, set_status_bar_style, window_controls_rect,
 };
 pub(crate) use window::*;
 

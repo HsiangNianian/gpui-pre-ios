@@ -18,5 +18,8 @@ The patches:
   is listed by `displays()`, `gpui_ios::external_display()` describes it, and a window opened with its
   `display_id` is shown on it (and closed when it disconnects).
 - Two-finger pinches are delivered as GPUI `PinchEvent`s (`on_pinch`).
+- `gpui_ios::set_interface_style(InterfaceStyle::{System, Light, Dark})`: holds every window (and the system
+  sheets and keyboard over it) to the app's own light or dark theme, with the status bar's content to match.
+  The status bar now follows the interface style by default, rather than always drawing dark content.
 
 Licensed under the Apache License 2.0, like the original (LICENSE-APACHE).
