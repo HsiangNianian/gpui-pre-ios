@@ -14,7 +14,7 @@ use super::text_input::TextInputView;
 use super::{CallbackSlot, IosDisplay, platform::IosPlatformState};
 use gpui::{
     AnyWindowHandle, BackGestureEvent, BackGesturePhase, Bounds, Capslock, Corners, DevicePixels,
-    DispatchEventResult, DisplayId, Edges, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
+    DispatchEventResult, DisplayId, Edges, GpuSpecs, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
     TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
@@ -1019,6 +1019,31 @@ impl IosWindowState {
 
     pub fn hide_keyboard(&self) {
         self.text_input_view.set_keyboard_visible(false);
+    }
+
+    /// Delivers the software keyboard's return key (✓, Go, Send, a hardware
+    /// keyboard's Return), which UIKit hands to the text input as an inserted
+    /// line break, as the Enter key it stands for: GPUI's key bindings, such as
+    /// a text field's submit, only hear key presses. Returns whether anything
+    /// handled it; otherwise the line break is inserted as text.
+    pub(super) fn dispatch_return_key(&self) -> bool {
+        let keystroke = Keystroke {
+            modifiers: self.modifiers.get(),
+            key: "enter".into(),
+            key_char: None,
+        };
+        let down = PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        let handled = self
+            .input_callback
+            .with(|callback| !callback(down).propagate)
+            .unwrap_or(false);
+        self.input_callback
+            .with(|callback| callback(PlatformInput::KeyUp(KeyUpEvent { keystroke })));
+        handled
     }
 
     pub(super) fn with_input_handler<R>(

@@ -200,7 +200,17 @@ define_class!(
         }
         #[unsafe(method(insertText:))]
         fn insert_text(&self, text: &NSString) {
-            self.edit(|handler| handler.replace_text_in_range(None, &text.to_string()));
+            let text = text.to_string();
+            // The return key arrives as a line break. Outside a composition it is
+            // the Enter key: a single-line field submits on it, which inserting
+            // "\n" (stripped by such a field) never did. A multi-line field's
+            // Enter binding inserts the line break itself.
+            if (text == "\n" || text == "\r") && !self.composing() {
+                if self.ivars().window.with_window(|window| window.dispatch_return_key()).unwrap_or(false) {
+                    return;
+                }
+            }
+            self.edit(|handler| handler.replace_text_in_range(None, &text));
         }
         #[unsafe(method(deleteBackward))]
         fn delete_backward(&self) {
@@ -548,6 +558,11 @@ impl TextInputView {
             }
         });
         self.ivars().native_edit.set(previous);
+    }
+
+    /// Whether marked (IME) text is being composed in the focused field.
+    fn composing(&self) -> bool {
+        self.with_handler(|handler| handler.marked_text_range().is_some()).unwrap_or(false)
     }
 
     fn document_range(&self) -> Option<Range<usize>> {
