@@ -314,6 +314,12 @@ define_class!(
                 .with_window(|window| window.handle_pinch(recognizer));
         }
 
+        #[unsafe(method(handleTwoFingerPan:))]
+        fn handle_two_finger_pan(&self, recognizer: &UIPanGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| window.handle_two_finger_pan(recognizer));
+        }
+
         #[unsafe(method(handleMultiFingerTap:))]
         fn handle_multi_finger_tap(&self, recognizer: &UITapGestureRecognizer) {
             if recognizer.state() == UIGestureRecognizerState::Ended {
@@ -371,6 +377,7 @@ define_class!(
             // No early return: define_class! converts the body's value to an ObjC BOOL.
             recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
                 || recognizer.downcast_ref::<UITapGestureRecognizer>().is_some()
+                || is_two_finger_pan(recognizer)
                 || self
                     .ivars()
                     .with_window(|window| window.begin_back_gesture(recognizer))
@@ -387,11 +394,20 @@ define_class!(
             let ours = |recognizer: &UIGestureRecognizer| {
                 recognizer.downcast_ref::<UIPinchGestureRecognizer>().is_some()
                     || recognizer.downcast_ref::<UITapGestureRecognizer>().is_some()
+                    || is_two_finger_pan(recognizer)
             };
             ours(recognizer) || ours(other)
         }
     }
 );
+
+/// Whether `recognizer` is the two-finger pan that moves content with a pinch, rather than the
+/// scroll or back-gesture recognizers, which are pans too.
+fn is_two_finger_pan(recognizer: &UIGestureRecognizer) -> bool {
+    recognizer
+        .downcast_ref::<UIPanGestureRecognizer>()
+        .is_some_and(|pan| pan.minimumNumberOfTouches() == 2)
+}
 
 impl MetalView {
     fn new(frame: CGRect, main_thread: MainThreadMarker) -> Retained<Self> {
@@ -466,6 +482,11 @@ pub(crate) struct IosWindowState {
     keyboard_dismiss_touch: Cell<Option<KeyboardDismissTouch>>,
     /// Where the back gesture an element claimed started, while it runs.
     back_gesture_start: Cell<Option<Point<Pixels>>>,
+    /// Finger touches delivered to GPUI and not yet ended, with where each last was.
+    fingers_down: RefCell<Vec<(TouchId, Point<Pixels>)>>,
+    /// Touches a two-finger gesture took over: GPUI was told they were cancelled, and hears
+    /// no more of them.
+    swallowed_touches: RefCell<Vec<TouchId>>,
     keyboard_height: Cell<f32>,
     /// Current mouse position (from touch)
     mouse_position: Cell<Point<Pixels>>,
@@ -605,7 +626,34 @@ impl IosWindow {
         };
         pinch_recognizer.setCancelsTouchesInView(false);
         pinch_recognizer.setDelegate(Some(ProtocolObject::from_ref(&*view)));
+        // Fingers only: a finger beside the Pencil is not a pinch.
+        pinch_recognizer.setAllowedTouchTypes(&NSArray::from_retained_slice(&[NSNumber::new_isize(
+            UITouchType::Direct.0,
+        )]));
         view.addGestureRecognizer(&pinch_recognizer);
+
+        // Two fingers moving together pan, at the same time as they pinch: each step is a pinch
+        // event with no zoom whose position, the fingers' centroid, has moved. A pinch alone
+        // does not begin until the fingers spread, so without this a two-finger drag would
+        // be left to GPUI's one-touch recognizer, which follows the first finger only, along
+        // one axis.
+        let two_finger_target: &AnyObject = &view;
+        // SAFETY: `MetalView` implements `handleTwoFingerPan:` and owns the recognizer.
+        let two_finger_pan = unsafe {
+            UIPanGestureRecognizer::initWithTarget_action(
+                UIPanGestureRecognizer::alloc(main_thread),
+                Some(two_finger_target),
+                Some(sel!(handleTwoFingerPan:)),
+            )
+        };
+        two_finger_pan.setMinimumNumberOfTouches(2);
+        two_finger_pan.setMaximumNumberOfTouches(2);
+        two_finger_pan.setAllowedTouchTypes(&NSArray::from_retained_slice(&[NSNumber::new_isize(
+            UITouchType::Direct.0,
+        )]));
+        two_finger_pan.setCancelsTouchesInView(false);
+        two_finger_pan.setDelegate(Some(ProtocolObject::from_ref(&*view)));
+        view.addGestureRecognizer(&two_finger_pan);
 
         // Two- and three-finger taps, for `on_multi_finger_tap`. Fingers only:
         // the Pencil never counts.
@@ -682,6 +730,8 @@ impl IosWindow {
             insets_changed_callback: CallbackSlot::default(),
             keyboard_dismiss_touch: Cell::new(None),
             back_gesture_start: Cell::new(None),
+            fingers_down: RefCell::new(Vec::new()),
+            swallowed_touches: RefCell::new(Vec::new()),
             keyboard_height: Cell::new(0.),
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
@@ -818,7 +868,60 @@ impl IosWindowState {
         // GPUI timestamps delivery itself. Replaying UIKit's historical coalesced
         // samples here would make them appear simultaneous and distort fling velocity.
         let id = touch_id(touch);
+        let phase = touch_phase(touch);
+        // A finger a two-finger gesture took over is its until it lifts.
+        {
+            let mut swallowed = self.swallowed_touches.borrow_mut();
+            if let Some(at) = swallowed.iter().position(|t| *t == id) {
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    swallowed.remove(at);
+                }
+                return;
+            }
+        }
+        if touch.r#type() == UITouchType::Direct {
+            let position = touch_location_in_view(touch, &self.view);
+            let mut down = self.fingers_down.borrow_mut();
+            down.retain(|(t, _)| *t != id);
+            if !matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                down.push((id, position));
+            }
+        }
         self.handle_touch_sample(touch, id);
+    }
+
+    /// A two-finger pan or pinch began: the fingers GPUI was following are cancelled there,
+    /// so its one-touch recognizer stops panning, or drawing, along the first of them, and
+    /// the gesture alone moves the content until they lift.
+    fn begin_two_finger_gesture(&self) {
+        let fingers = std::mem::take(&mut *self.fingers_down.borrow_mut());
+        for (id, position) in fingers {
+            self.swallowed_touches.borrow_mut().push(id);
+            let event = TouchEvent {
+                id,
+                phase: TouchPhase::Cancelled,
+                position,
+                predicted_position: None,
+                force: None,
+            };
+            TOUCH_IS_PENCIL.set(false);
+            self.input_callback
+                .with(|callback| callback(PlatformInput::Touch(event)));
+        }
+    }
+
+    /// Delivers one step of a two-finger pan, as a pinch event that does not zoom: its
+    /// position is where the fingers' centroid has moved to.
+    fn handle_two_finger_pan(&self, recognizer: &UIPanGestureRecognizer) {
+        if recognizer.state() == UIGestureRecognizerState::Began {
+            self.begin_two_finger_gesture();
+        }
+        let Some(event) = two_finger_pan_event(recognizer, &self.view) else {
+            return;
+        };
+        self.modifiers.set(event.modifiers);
+        self.input_callback
+            .with(|callback| callback(PlatformInput::Pinch(event)));
     }
 
     fn handle_touch_sample(&self, touch: &UITouch, id: TouchId) {
@@ -851,6 +954,9 @@ impl IosWindowState {
 
     /// Delivers one step of a two-finger pinch.
     fn handle_pinch(&self, recognizer: &UIPinchGestureRecognizer) {
+        if recognizer.state() == UIGestureRecognizerState::Began {
+            self.begin_two_finger_gesture();
+        }
         let Some(event) = pinch_event(recognizer, &self.view) else {
             return;
         };

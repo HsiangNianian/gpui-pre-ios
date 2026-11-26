@@ -109,6 +109,29 @@ pub fn scroll_event(recognizer: &UIPanGestureRecognizer, view: &UIView) -> Optio
     })
 }
 
+/// Converts one step of a two-finger pan into a pinch event that does not zoom: its position
+/// is the fingers' centroid, and how far that moved since the last event is how far the
+/// content pans. With a pinch running at the same time, content zooms about the centroid as
+/// it moves with it, as in Freeform. `None` for states that carry no pan.
+pub fn two_finger_pan_event(recognizer: &UIPanGestureRecognizer, view: &UIView) -> Option<PinchEvent> {
+    let phase = match recognizer.state() {
+        UIGestureRecognizerState::Began => TouchPhase::Started,
+        UIGestureRecognizerState::Changed => TouchPhase::Moved,
+        UIGestureRecognizerState::Ended => TouchPhase::Ended,
+        UIGestureRecognizerState::Cancelled | UIGestureRecognizerState::Failed => {
+            TouchPhase::Cancelled
+        }
+        _ => return None,
+    };
+    let location = recognizer.locationInView(Some(view));
+    Some(PinchEvent {
+        position: Point::new(px(location.x as f32), px(location.y as f32)),
+        delta: 0.,
+        modifiers: modifiers(recognizer.modifierFlags()),
+        phase,
+    })
+}
+
 /// Converts one step of a two-finger pinch.
 ///
 /// The recognizer's scale is reset after each step, so every event carries only
